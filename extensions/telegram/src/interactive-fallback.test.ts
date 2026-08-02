@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { handleTelegramQuestionCallback } from "./bot-handlers.callback-questions.runtime.js";
 import { canonicalizeTelegramPresentationPayload } from "./interactive-fallback.js";
+import { parseTelegramQuestionCallbackData } from "./question-callback-data.js";
 
 describe("canonicalizeTelegramPresentationPayload", () => {
   it("preserves mixed presentation order while moving controls to Telegram buttons", () => {
@@ -100,6 +102,60 @@ describe("canonicalizeTelegramPresentationPayload", () => {
           { text: "Staging", callback_data: "staging" },
         ],
       ],
+    });
+  });
+
+  it("resolves the fourth question option after Telegram splits its button rows", async () => {
+    const questionId = "ask_0123456789abcdef0123456789abcdef";
+    const optionValues = ["Staging", "Déployer", "東京", "Production 🚀"];
+    const result = canonicalizeTelegramPresentationPayload({
+      presentation: {
+        blocks: [
+          {
+            type: "buttons",
+            buttons: optionValues.map((optionValue) => ({
+              label: optionValue,
+              action: { type: "question" as const, questionId, optionValue },
+            })),
+          },
+        ],
+      },
+    });
+    const telegram = result.channelData?.telegram as
+      | { buttons?: ReadonlyArray<ReadonlyArray<{ callback_data?: string }>> }
+      | undefined;
+    const rows = telegram?.buttons;
+
+    expect(rows?.map((row) => row.length)).toEqual([3, 1]);
+    expect(rows?.flatMap((row) => row.map((button) => button.callback_data))).toEqual(
+      optionValues.map((_, optionIndex) => `tgq1:${questionId}:${optionIndex}`),
+    );
+
+    const callback = parseTelegramQuestionCallbackData(rows?.[1]?.[0]?.callback_data);
+    if (!callback) {
+      throw new Error("expected the fourth Telegram question button to decode");
+    }
+    const resolveQuestion = vi.fn(async (params: { optionIndex?: number }) => ({
+      status: "answered" as const,
+      questionId,
+      optionValue: optionValues[params.optionIndex ?? -1] ?? "",
+    }));
+
+    await handleTelegramQuestionCallback({
+      callback,
+      cfg: {} as never,
+      senderId: "42",
+      feedback: vi.fn(async () => undefined),
+      resolveQuestion,
+    });
+
+    expect(resolveQuestion).toHaveBeenCalledWith(
+      expect.objectContaining({ questionId, optionIndex: 3 }),
+    );
+    await expect(resolveQuestion.mock.results[0]?.value).resolves.toEqual({
+      status: "answered",
+      questionId,
+      optionValue: "Production 🚀",
     });
   });
 
